@@ -1,0 +1,36 @@
+## Interface: 16001, 120105, 120107
+## Title: |cff5ec8ffBaggler|r
+## Notes: Baggler - minimal, auto-organizing bags with full controller support.
+## Author: Craig
+## Version: 0.2.0-beta.1
+## SavedVariables: BagglerDB
+## IconTexture: Interface\AddOns\Baggler\Assets\baggler-icon.tga
+## Category: Inventory
+
+Core.lua
+InputSession.lua
+ProfileShare.lua
+EquippedCompare.lua
+ComparisonHost.lua
+Log.lua
+CampingData.lua
+Categories.lua
+Inventory.lua
+Widgets.lua
+NativeWindows.lua
+Gamepad.lua
+InputHost.lua
+GamepadWindows.lua
+Menu.lua
+Shell.lua
+ActionBars.lua
+Window.lua
+WindowUse.lua
+WindowMenus.lua
+WindowPad.lua
+Bank.lua
+Extras.lua
+Card.lua
+Remote.lua
+Options.lua
+Integrations.lua

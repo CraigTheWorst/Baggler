@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# baggler - check, test, package and (optionally) sync the Baggler addon.  Usage: baggler <command> [addon|all]
+set -u
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+. "$ROOT/project.conf"
+SRC="$ROOT/addons"
+red(){ printf '\033[31m%s\033[0m\n' "$*"; }; grn(){ printf '\033[32m%s\033[0m\n' "$*"; }; dim(){ printf '\033[2m%s\033[0m\n' "$*"; }
+
+targets() {  # resolve "all"/empty/name into a list, validating names
+  local t="${1:-all}"
+  if [ "$t" = all ]; then echo $ADDONS; return; fi
+  for a in $ADDONS; do [ "$a" = "$t" ] && { echo "$a"; return; }; done
+  red "unknown or unmanaged add-on '$t' (managed: $ADDONS; pending: ${PENDING:-none})" >&2; return 1
+}
+
+cmd_status() {  # compare project vs installed copy
+  local selected; selected=$(targets "${1:-all}") || return 1
+  for a in $selected; do
+    local v; v=$(grep -m1 '^## Version' "$SRC/$a/$a.toc" | cut -d' ' -f3)
+    local i; i=$(grep -m1 '^## Interface' "$SRC/$a/$a.toc" | cut -d' ' -f3)
+    if [ ! -d "$ADDONS_DIR/$a" ]; then echo "$a  v$v  interface $i  NOT INSTALLED"; continue; fi
+    local d; d=$(rsync -rcn --delete --itemize-changes "$SRC/$a/" "$ADDONS_DIR/$a/" | grep -v '^\.' | wc -l)
+    [ "$d" = 0 ] && echo "$a  v$v  interface $i  installed copy matches" || echo "$a  v$v  interface $i  $d file(s) differ from installed copy"
+  done
+  if [ -n "${PENDING:-}" ]; then dim "pending (not managed yet): $PENDING"; fi
+}
+
+cmd_check() {  # syntax + toc + tests, no installing
+  local fail=0
+  local selected; selected=$(targets "${1:-all}") || return 1
+  for a in $selected; do
+    for f in $(grep -E '\.lua$' "$SRC/$a/$a.toc"); do [ -f "$SRC/$a/$f" ] || { red "$a: TOC lists missing file $f"; fail=1; }; done
+    for f in "$SRC/$a"/*.lua; do luajit -e "assert(loadfile('$f'))" 2>&1 | head -1 | grep . && fail=1; done
+    grep -q '^## Interface' "$SRC/$a/$a.toc" || { red "$a: no Interface line"; fail=1; }
+  done
+  # Never overwrite Blizzard's tables/functions from add-on code: it taints them for the game's own secure code.
+  if grep -rnE "^[[:space:]]*(C_Container|C_Item|C_Spell|C_ActionBar|_G\.(UseContainerItem|PickupContainerItem|CastSpellByName|UseAction))\.?[A-Za-z_]*[[:space:]]*=[^=]|^[[:space:]]*(Container|C_Container)\.[A-Za-z]+[[:space:]]*=[^=]" --include=*.lua "$SRC" 2>/dev/null | grep -v '/Tests/' ; then
+    red "an add-on assigns into a Blizzard API table (taint risk) - see lines above"; fail=1
+  fi
+  [ $fail = 0 ] && grn "check: syntax + TOC ok" || { red "check: FAILED"; return 1; }
+}
+
+cmd_test() {  # Run the actual standalone Baggler TOC and regression suites.
+  (cd "$ROOT/addons/Baggler/Tests/Independent/input" && timeout 90 luajit tests.lua) || return $?
+  (cd "$ROOT/addons/Baggler/Tests/Independent/settings" && timeout 90 luajit test.lua && timeout 90 luajit spec_tests.lua) || return $?
+  (cd "$ROOT/addons/Baggler/Tests/Independent/comparison" && timeout 90 luajit test_comparison.lua) || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/input_adapter_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/comparison_adapter_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/replacement_integration_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/bags_only_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/taxi_lifecycle_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/junk_shortcut_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/footer_polish_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/bag_equip_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/bag_equip_native_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/combat_close_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/combat_b_close_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/combat_lag_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/merchant_pair_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/mail_pair_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/card_refresh_test.lua") || return $?
+  (cd "$ROOT" && timeout 60 luajit "addons/Baggler/Tests/card_body_test.lua") || return $?
+  (cd "$ROOT" && timeout 60 luajit "addons/Baggler/Tests/alt_counts_tooltip_test.lua") || return $?
+  (cd "$ROOT" && timeout 60 luajit "addons/Baggler/Tests/defaults_merge_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/ah_use_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/panel_close_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/stack_split_focus_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/stack_split_merchant_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/taint_watch_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/aura_probe_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/incidents_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/merchant_open_probe_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/native_item_boundary_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/capacity_count_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/slot_probe_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/search_focus_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/settings_polish_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/settings_mapping_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/settings_controller_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/accent_palette_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/chrome_labels_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/item_outline_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/pixel_tiles_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/bank_footer_size_test.lua") || return $?
+  (cd "$ROOT" && timeout 60 luajit "addons/Baggler/Tests/camping_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/release_safety_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 luajit "addons/Baggler/Tests/branding_test.lua") || return $?
+  (cd "$ROOT" && timeout 90 python3 "addons/Baggler/Tests/artwork_test.py") || return $?
+  (cd "$ROOT" && timeout 90 python3 "tests/test_packaging.py") || return $?
+  (cd "$ROOT" && timeout 90 python3 "tests/test_release_verification.py")
+}
+
+cmd_sync() {  # project -> game folder (only the named add-ons; never touches anything else)
+  cmd_check "${1:-all}" || { red "refusing to install a broken tree"; return 1; }
+  local selected; selected=$(targets "${1:-all}") || return 1
+  for a in $selected; do
+    rsync -a --delete --exclude='.git' --exclude='README.md' "$SRC/$a/" "$ADDONS_DIR/$a/" && grn "installed $a"
+  done
+  dim "in game: /reload"
+}
+
+cmd_pull() {  # game folder -> project (rescue edits made directly in the game folder)
+  local selected; selected=$(targets "${1:-all}") || return 1
+  for a in $selected; do rsync -a --exclude='.git' "$ADDONS_DIR/$a/" "$SRC/$a/" && grn "pulled $a"; done
+}
+
+cmd_interface() {  # update-day: baggler interface 16002[,120107]  -> rewrites every managed TOC
+  [ -z "${1:-}" ] && { echo "usage: baggler interface <number[,number...]>"; return 1; }
+  for a in $ADDONS; do sed -i "s/^## Interface:.*/## Interface: $1/" "$SRC/$a/$a.toc"; echo "$a -> $1"; done
+}
+
+cmd_version() {  # baggler version 0.2.0  -> sets every managed add-on's version
+  [ -z "${1:-}" ] && { echo "usage: baggler version <x.y.z>"; return 1; }
+  for a in $ADDONS; do sed -i "s/^## Version:.*/## Version: $1/" "$SRC/$a/$a.toc"; done; echo "all managed add-ons now v$1"
+}
+
+cmd_pack() {  # public ZIP name; Baggler is the install/loader directory
+  local selected; selected=$(targets "${1:-all}") || return 1
+  cmd_check "${1:-all}" || return 1
+  python3 "$ROOT/tools/package_baggler.py"
+}
+
+cmd_install_all() { cmd_sync all; }
+
+case "${1:-help}" in
+  status) cmd_status "${2:-all}";; check) cmd_check "${2:-all}";; test) cmd_test;;
+  sync|install) cmd_sync "${2:-all}";; pull) cmd_pull "${2:-all}";;
+  interface) cmd_interface "${2:-}";; version) cmd_version "${2:-}";; pack) cmd_pack "${2:-}";;
+  *) cat <<H
+baggler <command> [addon|all]
+  status [a]     does the installed copy match the project?
+  check  [a]     syntax + TOC sanity (no install)
+  test           run the simulated-WoW test suites
+  sync   [a]     check, then install into the game's AddOns (project is the source of truth)
+  pull   [a]     copy game-folder edits back into the project
+  interface N    update-day: set ## Interface for every add-on
+  version X.Y.Z  set the version on every add-on
+  pack [a]       build dist/Baggler-<ver>.zip (Baggler/ only)
+H
+esac
