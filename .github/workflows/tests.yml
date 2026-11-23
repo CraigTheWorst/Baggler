@@ -1,0 +1,27 @@
+name: Baggler Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit
+
+      - name: Check addon
+        run: bash tools/baggler check Baggler
+
+      - name: Run regression tests
+        run: bash tools/baggler test
